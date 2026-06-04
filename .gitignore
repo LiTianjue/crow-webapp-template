@@ -1,0 +1,40 @@
+# Backend build artifacts (CMake / g++)
+app/build/
+app/CMakeFiles/
+app/cmake_install.cmake
+app/Makefile
+app/CMakeCache.txt
+app/compile_commands.json
+app/server
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Frontend build artifacts (Vue CLI / webpack)
+web/dist/
+web/node_modules/
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*
+web/pnpm-debug.log*
+
+# Runtime data created by the backend on first write
+db.json
+
+# Editor / IDE / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local env overrides
+.env
+.env.local
+.env.*.local
