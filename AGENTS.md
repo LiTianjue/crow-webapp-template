@@ -2,30 +2,30 @@
 
 ## 项目说明
 
-`web-template` 是一个**配置管理系统模板**:C++11/17 Crow 后端 + Vue 2 + Element UI 前端,实现 HTTP Digest 摘要认证保护的配置项增删改查。
+`web-template` 是一个**配置管理系统模板**:C++11 httplib 后端 + Vue 2 + Element UI 前端,实现 HTTP Digest 摘要认证保护的配置项增删改查。
 
-- **后端**(`app/`):单头文件 `app.hpp` 实现 `RestApp`(路由 + 持久化)+ `DigestAuthMiddleware`(Crow middleware,拦截 `/api/*`)。`main.cpp` ~5 行,只 `RestApp app; app.run();`。
+- **后端**(`app/`):单头文件 `app.hpp` 实现 `RestApp`(路由 + 持久化)+ `DigestAuth`(自实现,每个路由 handler 开头调用 `checkAuth`)。`main.cpp` ~5 行,只 `RestApp app; app.run();`。
 - **前端**(`web/`):Vue 2.7 SPA,Vue Router **hash 模式**,Element UI 表单,axios + blueimp-md5 自实现 digest 客户端。
-- **第三方**(`third/`):vendored 头文件 `crow_all.h` + `json.hpp` (nlohmann)。无外部依赖,链接仅需 pthread。
+- **第三方**(`third/`):vendored 头文件 `httplib.h` + `json.hpp` (nlohmann)。无外部依赖,链接仅需 pthread。
 - **持久化**(`app/mockdb/` + `app/type/`):typed 模板化 DB。`EasyDB` 把每个 struct 注册成 key,落到 `./db.json`(运行 cwd)。
 - **默认凭证**:`admin` / `admin123`,realm `SignalController`。
 
 ## 目录结构
 
 ```
-app/                    # 后端 (C++17 + Crow)
+app/                    # 后端 (C++11 + httplib)
   main.cpp              # ~5 行,只构造并 run RestApp
-  app.hpp               # RestApp + DigestAuth + DigestAuthMiddleware (路由/middleware 全在这里)
+  app.hpp               # RestApp + DigestAuth + checkAuth + 路由注册 (全在这里)
   md5.hpp               # 独立 MD5,被 DigestAuth 调用
   mockdb/
     easydb.hpp          # EasyDB 模板 + NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT
     namedkey.h          # NAMEDKEY(StructName) 宏,把 struct 注册成 DB key
   type/
-    deviceinfo.h        # struct DeviceName (deviceName / manufacturer / software)
-  CMakeLists.txt        # C++17,链接 pthread,禁默认 static dir
+    deviceinfo.h        # struct DeviceName, LaneInfo, SzLaneInfoTable 等
+  CMakeLists.txt        # C++11,链接 pthread
   build/                # cmake 产物 (gitignored)
 third/
-  crow_all.h            # Crow 单头 (vendored)
+  httplib.h             # httplib 单头 (vendored)
   json.hpp              # nlohmann/json 单头 (vendored)
 web/                    # 前端 (Vue 2 + Element UI)
   src/
@@ -47,15 +47,13 @@ web/                    # 前端 (Vue 2 + Element UI)
 ## 关键非显然约束
 
 ### 后端
-- **构建用 C++17**(尽管应用代码风格是 C++11)。`third/crow_all.h` 用了 6 个 C++17 特性,`app/CMakeLists.txt:4` 已 hard-set `set(CMAKE_CXX_STANDARD 17)`,外部传 `-DCMAKE_CXX_STANDARD=11` 无效。
-- **Crow 没有内置 HTTP digest auth**。`DigestAuth` 类是自行实现,逻辑全在 `app/app.hpp:17-106`。
-- **Crow 默认的 `set_static_file_info` 会把路径里的 `..` 替换成 `_`**(`sanitize_filename` 行为),破坏 `../web/dist/...` 这种相对路径。**所有静态文件相关调用必须用 `set_static_file_info_unsafe`**,已在 `app.hpp:208, 218` 使用。
-- **Crow 内置默认静态目录 `static/` 已禁用**(`add_compile_definitions(CROW_DISABLE_STATIC_DIR)`),改用 `app.hpp:212-220` 自定义的 `/static/<path>` 路由,从 `../web/dist/` 提供文件。
-- **路由 `/static/<path>` 内有 `path.find("..") != npos` 防御**(`app.hpp:214`),防止路径穿越。
-- **401 响应故意不发送 `WWW-Authenticate` 头**,把 challenge 放进 JSON body `{"error":"unauthorized","challenge":"Digest ..."}`。原因:浏览器看到 `WWW-Authenticate` 会弹原生对话框并按 realm 缓存 HA1,导致后续请求即使 JS 算的是错误密码也会被浏览器注入的缓存头绕过。`app.hpp:124-131` 是关键修改点。
-- **服务端** `crow::App<DigestAuthMiddleware>` **不是** `crow::SimpleApp`(`app.hpp:156`)。改 middleware 必须改成 `App<...>`。
+- **构建用 C++11**。httplib 纯 C++11 兼容,无需 C++17。
+- **httplib 没有中间件机制**。每个路由 handler 开头必须手动调用 `checkAuth(req, res)`,如果返回 false 则直接 return。`app.hpp:138-152` 是 `checkAuth` 实现,`app.hpp:224-237` 是调用示例。
+- **静态文件服务自实现**。`serveStaticFile` (`app.hpp:175-221`) 从 `../web/dist/` 读取文件,路径防御 `..` 穿越。
+- **路由 `/static/(.*)` 用正则捕获文件路径**。`req.matches[1]` 拿到捕获组,传给 `serveStaticFile`。
+- **401 响应 body 带 challenge,不发 `WWW-Authenticate` 头**。原因:浏览器看到 `WWW-Authenticate` 会弹原生对话框并按 realm 缓存 HA1,导致后续请求即使 JS 算的是错误密码也会被浏览器注入的缓存头绕过。`app.hpp:145-150` 是关键。
 - **MD5 实现在 `app/md5.hpp`**,独立文件,无外部依赖。**字节序陷阱**:state words (a0/b0/c0/d0) 必须是**顺序**输出 (a0[0..3] b0[0..3] ...),**不能** interleave。`md5.hpp:110-116` 是关键。修改时务必对照 RFC 1321 test vectors。
-- **`DigestAuthMiddleware::before_handle` 已经会拦 `/api/*`**(返回 401 + body challenge),路由 handler **不需要** 也不应该再做 auth check —— 路由层冗余的 check 已经在之前的重构中删除。
+- **已有两个 API 端点**:`/api/Config/DeviceName` 和 `/api/Config/SzLaneInfoTable`,新增端点需按同模式添加。
 
 ### 前端
 - **必须用 hash 模式路由**,因为后端 SPA fallback 只服务 `/` 一个路径。`web/src/router/index.js` 走 `mode: 'hash'`。
@@ -67,8 +65,8 @@ web/                    # 前端 (Vue 2 + Element UI)
 
 ## 易踩的坑
 
-1. **`NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT` 的 from_json 会把缺字段重置成 struct 默认值**(不是上一次持久化的值)。当前 `easydb.hpp:13` 用的是这个变体,所以**前端 POST 时必须发全所有字段** —— 如果只发 `{deviceName: "foo"}`,后端 `manufacturer`/`software` 会被覆盖成 `"Hikvision"`/`"V4.0.1"`,丢掉自定义值。`DeviceName.vue` 已经按这个语义实现(load 后 save 带上三字段);新增字段时也要遵守。要保留旧值语义,改回 `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE`。
-2. **`db.json` 写在运行 cwd**(`easydb.hpp:20` 写死 `./db.json`),不是相对源码树。后端以哪个目录启动,`db.json` 就落在哪。从 `app/` 跑 `./build/server` 就会在 `app/db.json` 落盘。
+1. **`NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT` 的 from_json 会把缺字段重置成 struct 默认值**(不是上一次持久化的值)。当前 `easydb.hpp:13-14` 用的是这个变体,所以**前端 POST 时必须发全所有字段** —— 如果只发 `{deviceName: "foo"}`,后端 `manufacturer`/`software` 会被覆盖成 `"Hikvision"`/`"V4.0.1"`,丢掉自定义值。`DeviceName.vue` 已经按这个语义实现(load 后 save 带上三字段);新增字段时也要遵守。要保留旧值语义,改回 `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE`。
+2. **`db.json` 写在运行 cwd**(`easydb.hpp:21` 写死 `./db.json`),不是相对源码树。后端以哪个目录启动,`db.json` 就落在哪。从 `app/` 跑 `./build/server` 就会在 `app/db.json` 落盘。
 3. **不要在 `app/` 留下 `data/` 目录或 `device_name.txt`**。旧版本用过这个文件做持久化,已经废弃;新代码路径完全不读它,留着只会误导。
 
 ## 常用命令
@@ -89,28 +87,28 @@ NODE_ENV=production npm run build                      # 显式指定
 
 # 手工验证 digest 401
 curl -i http://127.0.0.1:8080/api/Auth/Check
-# 期望: 401,无 WWW-Authenticate 头,body 为 {"error":"unauthorized","challenge":"Digest ..."}
+# 期望: 401,body 为 {"error":"unauthorized","challenge":"Digest ..."}
 ```
 
 ## 改动时的检查清单
 
 1. **改了后端**:`cd app/build && make -j` 重新编译,确认 `app/build/server` mtime 更新。
-2. **改了 `app/app.hpp` 路由或中间件**:`./app/build/server` 必须重启才生效(先 `kill` 旧进程)。
-3. **改了前端**:`cd web && npm run build`,把新 dist 产物链接到后端(后端会从 `../web/dist/` 读)。dev 模式 (`npm run serve`) 自动热重载。
+2. **改了 `app/app.hpp` 路由**:`./app/build/server` 必须重启才生效(先 `kill` 旧进程)。
+3. **改了前端**:`cd web && npm run build`,dev 模式 (`npm run serve`) 自动热重载。
 4. **新增 API 端点**:
    - `app/type/<name>.h` 加 struct
    - `app/mockdb/easydb.hpp` 顶部加 `NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(<Name>, field1, field2, ...)`(或非 WITH_DEFAULT 变体,见"易踩的坑 #1")
    - `app/mockdb/easydb.hpp` 末尾加 `NAMEDKEY(<Name>)`
-   - `app.hpp:registerRoutes` 加 `CROW_ROUTE` + `renderGET<T>` / `renderPOST<T>` 调用
+   - `app.hpp:registerRoutes` 加 `server_.Get("/api/Config/<Name>")` + `server_.Post("/api/Config/<Name>")`,每个 handler 开头调 `checkAuth`
    - 前端 `web/src/api/<name>.js` 暴露函数,**load 后 save 带上所有字段**
    - `router/index.js` 加子路由 (`meta: { requiresAuth: true, title, icon }`),`AppLayout.vue` 侧边栏**自动**渲染
-5. **改了默认凭证**:`app/app.hpp:114` 改 `auth_("SignalController", "admin", "admin123")`,前端 **不需要** 改 (`auth.js` 用占位符传任何东西),后端是唯一信源。
-6. **调试 digest 校验失败**:`app.hpp:144` 把 `app_.loglevel(crow::LogLevel::Warning)` 临时改成 `Debug`,`DigestAuth::verify` (`app.hpp:65`) 末尾加 `CROW_LOG_DEBUG` 打印 `expected` vs `response` 即可。
+5. **改了默认凭证**:`app/app.hpp:115` 改 `auth_("SignalController", "admin", "admin123")`。
+6. **调试 digest 校验失败**:在 `checkAuth` 失败分支加日志,打印 expected vs response 即可。
 
 ## 禁止改的东西
 
-- `third/crow_all.h` 和 `third/json.hpp` 是 vendored,改前先确认没有更轻的方案。
+- `third/httplib.h` 和 `third/json.hpp` 是 vendored,改前先确认没有更轻的方案。
 - `app/main.cpp` 只该有 ~5 行(`#include "app.hpp"` + `int main() { ... }`),所有逻辑塞进 `app.hpp`。
 - `app/app.hpp` 不要拆成 .h + .cpp,header-only 是设计要求。
 - `md5.hpp` 字节序一旦改对就别再动(参见上文"字节序陷阱")。
-- 不要在路由 handler 里加 auth check —— middleware 已经处理,加在 handler 里会绕过现有机制。
+- 每个路由 handler 开头必须调用 `checkAuth`,漏了会失去认证保护。
