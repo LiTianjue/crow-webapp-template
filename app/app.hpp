@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../third/crow_all.h"
+#include "../third/httplib.h"
 #include "../third/json.hpp"
 #include "md5.hpp"
 #include "mockdb/easydb.hpp"
@@ -28,8 +28,12 @@ public:
              + "\", qop=\"auth\"";
     }
 
-    bool verify(const crow::request& req, const std::string& method) const {
-        const std::string& auth = req.get_header_value("Authorization");
+    bool verify(const httplib::Request& req, const std::string& method) const {
+        auto auth_it = req.headers.find("Authorization");
+        if (auth_it == req.headers.end()) {
+            return false;
+        }
+        const std::string& auth = auth_it->second;
         if (auth.size() < 7 || auth.compare(0, 7, "Digest ") != 0) {
             return false;
         }
@@ -46,7 +50,7 @@ public:
         if (get("realm")    != realm_) return false;
         const std::string nonce    = get("nonce");
         const std::string response = get("response");
-        const std::string uri      = get("uri").empty() ? req.url : get("uri");
+        const std::string uri      = get("uri").empty() ? req.path : get("uri");
         const std::string qop      = get("qop");
         if (nonce.empty() || response.empty()) return false;
 
@@ -105,43 +109,10 @@ private:
     std::string pass_;
 };
 
-struct DigestAuthMiddleware {
-    struct context {
-        bool authorized = false;
-    };
-
-    DigestAuthMiddleware()
-        : auth_("SignalController", "admin", "admin123") {}
-
-    void before_handle(crow::request& req, crow::response& res, context& ctx) {
-        if (req.url.compare(0, 5, "/api/") != 0) {
-            return;
-        }
-        if (auth_.verify(req, crow::method_name(req.method))) {
-            ctx.authorized = true;
-            return;
-        }
-        res.code = 401;
-        res.set_header("Content-Type", "application/json");
-        res.write(json{
-            {"error", "unauthorized"},
-            {"challenge", auth_.challenge()}
-        }.dump());
-        res.end();
-    }
-
-    void after_handle(crow::request&, crow::response&, context&) {}
-
-    const DigestAuth& auth() const { return auth_; }
-
-private:
-    DigestAuth auth_;
-};
-
 class RestApp {
 public:
-    RestApp() {
-        app_.loglevel(crow::LogLevel::Warning);
+    RestApp()
+        : auth_("SignalController", "admin", "admin123") {
         registerRoutes();
     }
 
@@ -149,74 +120,138 @@ public:
     RestApp& operator=(const RestApp&) = delete;
 
     void run(uint16_t port = 8080) {
-        app_.port(port).multithreaded().run();
+        server_.listen("0.0.0.0", port);
     }
 
 private:
-    using AppT = crow::App<DigestAuthMiddleware>;
-    AppT app_;
-	EasyDB db;
+    httplib::Server server_;
+    DigestAuth auth_;
+    EasyDB db;
     const std::string kWebDist_     = "../web/dist";
 
-    static crow::response JsonResponse(int code, const json& body) {
-        crow::response res(code, body.dump());
+    void setJsonResponse(httplib::Response& res, int status, const json& body) {
+        res.status = status;
         res.set_header("Content-Type", "application/json");
-        return res;
+        res.body = body.dump();
     }
-	template <typename T>
-    crow::response renderPOST(const crow::request &req)
-    {
+
+    bool checkAuth(const httplib::Request& req, httplib::Response& res) {
+        if (req.path.compare(0, 5, "/api/") != 0) {
+            return true;
+        }
+        if (auth_.verify(req, req.method)) {
+            return true;
+        }
+        res.status = 401;
+        res.set_header("Content-Type", "application/json");
+        res.body = json{
+            {"error", "unauthorized"},
+            {"challenge", auth_.challenge()}
+        }.dump();
+        return false;
+    }
+
+    template <typename T>
+    void renderPOST(const httplib::Request& req, httplib::Response& res) {
         T t;
         json j = json::parse(req.body, nullptr, false);
         if (!j.is_discarded()) {
             j.get_to(t);
         }
         db.write(t);
-        return std::move(crow::response(200,"OK"));
+        res.status = 200;
+        res.body = "OK";
     }
+
     template <typename T>
-    crow::response renderGET(const crow::request &req)
-    {
+    void renderGET(const httplib::Request& req, httplib::Response& res) {
         T t;
         db.read(t);
-        return crow::response(200, json(t).dump());
+        res.status = 200;
+        res.set_header("Content-Type", "application/json");
+        res.body = json(t).dump();
+    }
+
+    bool serveStaticFile(const std::string& path, httplib::Response& res) {
+        if (path.find("..") != std::string::npos) {
+            res.status = 404;
+            return false;
+        }
+        std::string fullPath = kWebDist_ + "/" + path;
+        std::ifstream in(fullPath, std::ios::binary | std::ios::ate);
+        if (!in) {
+            res.status = 404;
+            return false;
+        }
+        std::streamsize size = in.tellg();
+        in.seekg(0, std::ios::beg);
+        std::vector<char> buffer(size);
+        in.read(buffer.data(), size);
+        if (!in) {
+            res.status = 404;
+            return false;
+        }
+        res.status = 200;
+        res.body.assign(buffer.data(), size);
+        std::string ext;
+        size_t dotPos = path.rfind('.');
+        if (dotPos != std::string::npos) {
+            ext = path.substr(dotPos + 1);
+        }
+        if (ext == "html" || ext == "htm") {
+            res.set_header("Content-Type", "text/html");
+        } else if (ext == "js") {
+            res.set_header("Content-Type", "application/javascript");
+        } else if (ext == "css") {
+            res.set_header("Content-Type", "text/css");
+        } else if (ext == "png") {
+            res.set_header("Content-Type", "image/png");
+        } else if (ext == "jpg" || ext == "jpeg") {
+            res.set_header("Content-Type", "image/jpeg");
+        } else if (ext == "ico") {
+            res.set_header("Content-Type", "image/x-icon");
+        } else if (ext == "woff") {
+            res.set_header("Content-Type", "font/woff");
+        } else if (ext == "woff2") {
+            res.set_header("Content-Type", "font/woff2");
+        } else {
+            res.set_header("Content-Type", "application/octet-stream");
+        }
+        return true;
     }
 
     void registerRoutes() {
-        CROW_ROUTE(app_, "/api/Auth/Check")
-            .methods(crow::HTTPMethod::Get)
-        ([this](const crow::request&) {
-            const auto& mw = app_.get_middleware<DigestAuthMiddleware>();
-            return JsonResponse(200, json{{"user", mw.auth().user()}});
+        server_.Get("/api/Auth/Check", [&](const httplib::Request& req, httplib::Response& res) {
+            if (!checkAuth(req, res)) return;
+            setJsonResponse(res, 200, json{{"user", auth_.user()}});
         });
 
-        CROW_ROUTE(app_, "/api/Config/DeviceName")
-            .methods(crow::HTTPMethod::Get)
-        ([this](const crow::request& req) {
-            return renderGET<DeviceName>(req);
+        server_.Get("/api/Config/DeviceName", [&](const httplib::Request& req, httplib::Response& res) {
+            if (!checkAuth(req, res)) return;
+            renderGET<DeviceName>(req, res);
         });
 
-        CROW_ROUTE(app_, "/api/Config/DeviceName")
-            .methods(crow::HTTPMethod::Post)
-        ([this](const crow::request& req) {
-            return renderPOST<DeviceName>(req);
+        server_.Post("/api/Config/DeviceName", [&](const httplib::Request& req, httplib::Response& res) {
+            if (!checkAuth(req, res)) return;
+            renderPOST<DeviceName>(req, res);
         });
 
-        CROW_ROUTE(app_, "/")
-        ([this] {
-            crow::response res;
-            res.set_static_file_info_unsafe(kWebDist_ + "/index.html");
-            return res;
+        server_.Get("/api/Config/SzLaneInfoTable", [&](const httplib::Request& req, httplib::Response& res) {
+            if (!checkAuth(req, res)) return;
+            renderGET<SzLaneInfoTable>(req, res);
         });
 
-        CROW_ROUTE(app_, "/static/<path>")
-        ([this](const std::string& path) {
-            if (path.find("..") != std::string::npos) {
-                return crow::response(404);
-            }
-            crow::response res;
-            res.set_static_file_info_unsafe(kWebDist_ + "/" + path);
-            return res;
+        server_.Post("/api/Config/SzLaneInfoTable", [&](const httplib::Request& req, httplib::Response& res) {
+            if (!checkAuth(req, res)) return;
+            renderPOST<SzLaneInfoTable>(req, res);
+        });
+
+        server_.Get("/", [&](const httplib::Request& req, httplib::Response& res) {
+            serveStaticFile("index.html", res);
+        });
+
+        server_.Get("/static/(.*)", [&](const httplib::Request& req, httplib::Response& res) {
+            serveStaticFile(req.matches[1], res);
         });
     }
 };

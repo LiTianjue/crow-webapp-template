@@ -11,6 +11,7 @@
 using json = nlohmann::json;
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DeviceName, deviceName, manufacturer, software)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(LaneInfo, id, channel, flow, status)
 
 class EasyDB
 {
@@ -88,3 +89,4 @@ class EasyDB
 };
 
 NAMEDKEY(DeviceName)
+NAMEDKEY(SzLaneInfoTable)
